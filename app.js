@@ -234,12 +234,12 @@ function showNewEventForm() {
     <div class="row"><div style="flex:1"><label>Start date</label><input id="evStart" type="date"></div>
       <div style="flex:1"><label>End date</label><input id="evEnd" type="date"></div></div>
     <div class="field-inline">
-      <button class="primary" onclick="createEvent()">Create event</button>
+      <button class="primary" onclick="submitNewEvent()">Create event</button>
       <button class="ghost" onclick="$('#newEventForm').innerHTML=''">Cancel</button>
     </div><p class="error"></p></div>`;
   $('#evStart').value = todayStr(); $('#evEnd').value = todayStr();
 }
-async function createEvent() {
+async function submitNewEvent() {
   const name = $('#evName').value.trim(), desc = $('#evDesc').value.trim();
   const start = $('#evStart').value, end = $('#evEnd').value;
   if (!name) return msg('Enter an event name.');
