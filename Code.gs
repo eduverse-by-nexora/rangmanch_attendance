@@ -68,8 +68,17 @@ function jsonOut_(obj) {
 }
 
 /* ---------------- sheet plumbing ---------------- */
+// PERF: SpreadsheetApp.getActiveSpreadsheet() was being called fresh every single time
+// sheet_() ran (several times per request), and ensureSheets_() re-checked/created all 5
+// sheets on *every* request even once they already existed. Memoize the spreadsheet handle
+// for this execution and cache the "sheets already exist" fact across executions (6h) so
+// normal requests skip straight to reading/writing data instead of redoing setup work.
+let _ss = null;
+function ss_() { return _ss || (_ss = SpreadsheetApp.getActiveSpreadsheet()); }
 function ensureSheets_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const cache = CacheService.getScriptCache();
+  if (cache.get('sheetsReady') === '1') return;
+  const ss = ss_();
   Object.keys(SHEETS).forEach(function (name) {
     let sh = ss.getSheetByName(name);
     if (!sh) {
@@ -80,8 +89,9 @@ function ensureSheets_() {
   });
   const def = ss.getSheetByName('Sheet1');
   if (def && ss.getSheets().length > 1 && def.getLastRow() === 0) ss.deleteSheet(def);
+  cache.put('sheetsReady', '1', 21600);
 }
-function sheet_(name) { return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name); }
+function sheet_(name) { return ss_().getSheetByName(name); }
 function readAll_(name) {
   const sh = sheet_(name);
   const vals = sh.getDataRange().getValues();

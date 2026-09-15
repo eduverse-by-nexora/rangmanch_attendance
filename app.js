@@ -210,12 +210,18 @@ async function selectClub(clubId) {
   await refreshEvents();
   timers.events = setInterval(refreshEvents, POLL_MS);
 }
+let eventsFetchInFlight = false;
 async function refreshEvents() {
-  if (!state.currentClubId) return;
+  // Guard against overlapping polls: if a previous listEvents call hasn't returned yet
+  // (slow Apps Script response), skip this tick instead of queueing another request on
+  // top of it — request pile-up was making things feel slower and more error-prone, not less.
+  if (!state.currentClubId || eventsFetchInFlight) return;
+  eventsFetchInFlight = true;
   try {
     state.events = await callApi('listEvents', { clubId: state.currentClubId }, me.token);
     renderEventsList();
   } catch (e) { console.error(e); }
+  finally { eventsFetchInFlight = false; }
 }
 function renderEventsList() {
   const el = $('#eventsList'); if (!el) return;
@@ -246,8 +252,11 @@ async function submitNewEvent() {
   if (!start || !end) return msg('Select start and end dates.');
   if (end < start) return msg('End date must be after start date.');
   try {
-    await callApi('createEvent', { clubId: state.currentClubId, name, description: desc, startDate: start, endDate: end }, me.token);
-    $('#newEventForm').innerHTML = ''; refreshEvents();
+    const created = await callApi('createEvent', { clubId: state.currentClubId, name, description: desc, startDate: start, endDate: end }, me.token);
+    state.events.push(created);
+    state.events.sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
+    $('#newEventForm').innerHTML = '';
+    renderEventsList();
   } catch (e) { msg(e.message); }
 }
 
@@ -264,12 +273,17 @@ async function selectEvent(eventId) {
   await refreshStudents();
   timers.students = setInterval(refreshStudents, POLL_MS);
 }
+let studentsFetchInFlight = false;
 async function refreshStudents() {
-  if (!state.currentEventId) return;
+  // Same overlap guard as refreshEvents — skip a poll tick rather than stacking a second
+  // in-flight request behind a slow one.
+  if (!state.currentEventId || studentsFetchInFlight) return;
+  studentsFetchInFlight = true;
   try {
     state.students = await callApi('listStudents', { clubId: state.currentClubId, eventId: state.currentEventId }, me.token);
     onStudentsUpdate();
   } catch (e) { console.error(e); }
+  finally { studentsFetchInFlight = false; }
 }
 function renderEventPage() {
   const club = state.clubs.find(c => c.id === state.currentClubId);
@@ -352,9 +366,14 @@ async function addStudent() {
   if (name.length < 2) return msg('Enter a valid name.');
   if (state.students.some(s => s.name.toLowerCase() === name.toLowerCase())) return msg('This name is already on the list.');
   try {
-    await callApi('addStudent', { clubId: state.currentClubId, eventId: state.currentEventId, name, year, rollNo }, me.token);
+    // The addStudent action already returns the created student, so update local state
+    // from that instead of firing a second full listStudents round trip right after it —
+    // this was doubling the wait on every add. The regular poll keeps things in sync.
+    const created = await callApi('addStudent', { clubId: state.currentClubId, eventId: state.currentEventId, name, year, rollNo }, me.token);
+    state.students.push(created);
+    state.students.sort((a, b) => a.name.localeCompare(b.name));
     $('#stName').value = ''; $('#stRoll').value = ''; msg('Added.', true);
-    refreshStudents();
+    onStudentsUpdate();
   } catch (e) { msg(e.message); }
 }
 async function editStudent(id) {
@@ -368,15 +387,19 @@ async function editStudent(id) {
   if (![1, 2, 3].includes(year)) return alert('Year must be 1, 2, or 3.');
   const rollNo = prompt('Roll no (optional)', s.rollNo || '') || '';
   try {
-    await callApi('editStudent', { clubId: state.currentClubId, eventId: state.currentEventId, studentId: id, name: name.trim(), year, rollNo: rollNo.trim() }, me.token);
-    refreshStudents();
+    const updated = await callApi('editStudent', { clubId: state.currentClubId, eventId: state.currentEventId, studentId: id, name: name.trim(), year, rollNo: rollNo.trim() }, me.token);
+    const idx = state.students.findIndex(x => x.id === id);
+    if (idx !== -1) state.students[idx] = updated;
+    state.students.sort((a, b) => a.name.localeCompare(b.name));
+    onStudentsUpdate();
   } catch (e) { alert(e.message); }
 }
 async function deleteStudent(id) {
   if (!confirm('Remove this student from the event list? Their attendance record will be deleted.')) return;
   try {
     await callApi('deleteStudent', { clubId: state.currentClubId, eventId: state.currentEventId, studentId: id }, me.token);
-    refreshStudents();
+    state.students = state.students.filter(x => x.id !== id);
+    onStudentsUpdate();
   } catch (e) { alert(e.message); }
 }
 
@@ -438,8 +461,14 @@ function renderAttendanceTab(el) {
 function changeAttnDate(v) { state.attnDate = v; renderAttendanceTab($('#eventTabBody')); }
 async function toggleAttendance(studentId, date) {
   try {
-    await callApi('toggleAttendance', { clubId: state.currentClubId, eventId: state.currentEventId, studentId, date }, me.token);
-    refreshStudents();
+    // This fires on every single tap of "Mark present" — it was paying for a full
+    // listStudents round trip after every toggle on top of the toggle itself, which is
+    // the slowest, most noticeable spot in the app. toggleAttendance already returns the
+    // updated student, so just patch it into local state instead of re-fetching everything.
+    const updated = await callApi('toggleAttendance', { clubId: state.currentClubId, eventId: state.currentEventId, studentId, date }, me.token);
+    const idx = state.students.findIndex(x => x.id === studentId);
+    if (idx !== -1) state.students[idx] = updated;
+    onStudentsUpdate();
   } catch (e) { alert(e.message); }
 }
 async function openCheckin() {

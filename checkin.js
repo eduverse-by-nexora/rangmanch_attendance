@@ -14,25 +14,37 @@ function closedScreen(text) {
     <p class="muted">This QR code is no longer active. Ask the organizer to open check-in again.</p></div>`);
 }
 
+// Distinct from closedScreen(): this is for when the *request itself* failed (timeout,
+// network hiccup, server error) — previously any such failure silently showed the same
+// "Check-in closed" message as a genuinely closed event, which was misleading.
+function errorScreen() {
+  shell(`<div class="card login center" style="margin:0"><h1>Couldn't load check-in</h1>
+    <p class="muted">That took too long or something went wrong. Check your connection and try again.</p>
+    <button class="primary" style="margin-top:14px" onclick="init()">Retry</button></div>`);
+}
+
 async function init() {
   theme();
   if (!CONFIGURED) { shell(`<div class="card center"><h1>Setup required</h1><p class="muted">This app has not been configured yet — paste the Apps Script Web App URL into api.js.</p></div>`); return; }
   const params = new URLSearchParams(location.search);
   clubId = params.get('c'); eventId = params.get('e');
   if (!clubId || !eventId) return closedScreen('Invalid check-in link');
+  let info;
   try {
-    const info = await callApi('checkinInfo', { clubId, eventId });
-    if (!info.open) return closedScreen();
-    evInfo = info.event;
-    const lockKey = `checkin-${clubId}-${eventId}-${evInfo.checkinDate}`;
-    if (localStorage.getItem(lockKey)) return shell(`<div class="card login center" style="margin:0">
-      <h1 class="ok-text">Already submitted ✓</h1><p class="muted">This device already marked attendance for today.</p></div>`);
-    students = info.students;
-    renderForm();
-  } catch (e) {
-    console.error(e);
-    closedScreen();
+    info = await callApi('checkinInfo', { clubId, eventId });
+  } catch (e1) {
+    // One quiet retry: Apps Script occasionally has a slow/failed first request (cold
+    // start), and a single automatic retry clears most of those without bothering the user.
+    try { info = await callApi('checkinInfo', { clubId, eventId }); }
+    catch (e2) { console.error(e2); return errorScreen(); }
   }
+  if (!info.open) return closedScreen();
+  evInfo = info.event;
+  const lockKey = `checkin-${clubId}-${eventId}-${evInfo.checkinDate}`;
+  if (localStorage.getItem(lockKey)) return shell(`<div class="card login center" style="margin:0">
+    <h1 class="ok-text">Already submitted ✓</h1><p class="muted">This device already marked attendance for today.</p></div>`);
+  students = info.students;
+  renderForm();
 }
 
 function renderForm() {
@@ -75,7 +87,8 @@ async function submitCheckin() {
   const btn = $('#submitBtn'); btn.disabled = true; btn.textContent = 'Submitting…';
   const lockKey = `checkin-${clubId}-${eventId}-${evInfo.checkinDate}`;
   try {
-    await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId });
+    try { await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId }); }
+    catch (e1) { await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId }); }
     localStorage.setItem(lockKey, '1');
     shell(`<div class="card login center" style="margin:0"><h1 class="ok-text">Attendance recorded ✓</h1>
       <p class="muted">Thanks — your attendance has been sent successfully.</p></div>`);
