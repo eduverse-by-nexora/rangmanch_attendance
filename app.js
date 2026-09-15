@@ -318,7 +318,7 @@ function renderRosterTab(el) {
       <div class="row">
         <input id="stName" placeholder="Full name" style="flex:2;margin:0">
         <select id="stYear" style="flex:1;margin:0">
-          <option value="1">1st Year</option><option value="2">2nd Year</option><option value="3">3rd Year</option>
+          <option value="1">1st Year</option><option value="2">2nd Year</option><option value="3">3rd Year</option><option value="4">4th Year</option>
         </select>
         <input id="stRoll" placeholder="Roll no (optional)" style="flex:1;margin:0">
         <button class="primary" onclick="addStudent()">Add</button>
