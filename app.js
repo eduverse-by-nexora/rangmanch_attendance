@@ -25,6 +25,11 @@ const todayStr = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 const fmtDate = d => new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+// Renders an optional "HH:MM" 24h time as a friendly 12h string, e.g. "14:05" -> "2:05 PM".
+const fmtTime = t => t ? new Date(`2000-01-01T${t}:00`).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
+// Appends " · start–end" to a date-range line when either time is set; omitted entirely
+// for all-day events with no time picked.
+const dateTimeRange = ev => `${esc(ev.startDate)} → ${esc(ev.endDate)}` + ((ev.startTime || ev.endTime) ? ` · ${esc(fmtTime(ev.startTime))}${ev.endTime ? ' – ' + esc(fmtTime(ev.endTime)) : ''}` : '');
 
 function dateRange(start, end) {
   const out = []; let d = new Date(start + 'T00:00:00'); const last = new Date(end + 'T00:00:00');
@@ -66,7 +71,11 @@ let state = {
 const timers = {};
 function clearTimer(key) { if (timers[key]) { clearInterval(timers[key]); delete timers[key]; } }
 function clearAllTimers() { Object.keys(timers).forEach(clearTimer); }
-const POLL_MS = 4000;
+// Was 4000ms — that was hitting the Apps Script backend (which is inherently slow,
+// often 1-3s+ per call) every 4 seconds even when nothing changed, adding to perceived
+// lag and occasional throttling. 8000ms halves the background request volume while still
+// refreshing often enough for live attendance/roster viewing.
+const POLL_MS = 8000;
 
 /* ---------------- boot ---------------- */
 function setup() {
@@ -229,7 +238,7 @@ function renderEventsList() {
   el.innerHTML = `<div class="grid">${state.events.map(ev => `
     <div class="card" style="cursor:pointer" onclick="selectEvent('${ev.id}')">
       <div class="row"><h2>${esc(ev.name)}</h2>${statusPill(eventStatus(ev))}</div>
-      <p class="muted small">${esc(ev.startDate)} → ${esc(ev.endDate)}</p>
+      <p class="muted small">${dateTimeRange(ev)}</p>
       ${ev.description ? `<p class="small">${esc(ev.description)}</p>` : ''}
     </div>`).join('')}</div>`;
 }
@@ -239,6 +248,8 @@ function showNewEventForm() {
     <label>Description (optional)</label><input id="evDesc" placeholder="Short description">
     <div class="row"><div style="flex:1"><label>Start date</label><input id="evStart" type="date"></div>
       <div style="flex:1"><label>End date</label><input id="evEnd" type="date"></div></div>
+    <div class="row"><div style="flex:1"><label>Start time (optional)</label><input id="evStartTime" type="time"></div>
+      <div style="flex:1"><label>End time (optional)</label><input id="evEndTime" type="time"></div></div>
     <div class="field-inline">
       <button class="primary" onclick="submitNewEvent()">Create event</button>
       <button class="ghost" onclick="$('#newEventForm').innerHTML=''">Cancel</button>
@@ -248,11 +259,13 @@ function showNewEventForm() {
 async function submitNewEvent() {
   const name = $('#evName').value.trim(), desc = $('#evDesc').value.trim();
   const start = $('#evStart').value, end = $('#evEnd').value;
+  const startTime = $('#evStartTime').value, endTime = $('#evEndTime').value;
   if (!name) return msg('Enter an event name.');
   if (!start || !end) return msg('Select start and end dates.');
   if (end < start) return msg('End date must be after start date.');
+  if (startTime && endTime && start === end && endTime <= startTime) return msg('End time must be after start time.');
   try {
-    const created = await callApi('createEvent', { clubId: state.currentClubId, name, description: desc, startDate: start, endDate: end }, me.token);
+    const created = await callApi('createEvent', { clubId: state.currentClubId, name, description: desc, startDate: start, endDate: end, startTime, endTime }, me.token);
     state.events.push(created);
     state.events.sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
     $('#newEventForm').innerHTML = '';
@@ -294,7 +307,7 @@ function renderEventPage() {
       <b onclick="selectClub('${club.id}')">${esc(club.name)}</b> <span class="sep">/</span> ${esc(ev.name)}
     </div>
     <div class="row"><div><h1>${esc(ev.name)}</h1>
-      <p class="muted">${esc(ev.startDate)} → ${esc(ev.endDate)} ${statusPill(eventStatus(ev))}</p></div>
+      <p class="muted">${dateTimeRange(ev)} ${statusPill(eventStatus(ev))}</p></div>
       <button class="small" onclick="exportCSV()">⬇ Export CSV</button>
     </div>
     <div class="tabs">
