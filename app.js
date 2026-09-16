@@ -248,8 +248,8 @@ function showNewEventForm() {
     <label>Description (optional)</label><input id="evDesc" placeholder="Short description">
     <div class="row"><div style="flex:1"><label>Start date</label><input id="evStart" type="date"></div>
       <div style="flex:1"><label>End date</label><input id="evEnd" type="date"></div></div>
-    <div class="row"><div style="flex:1"><label>Start time (optional)</label><input id="evStartTime" type="time"></div>
-      <div style="flex:1"><label>End time (optional)</label><input id="evEndTime" type="time"></div></div>
+    <div class="row"><div style="flex:1"><label>Start time</label><input id="evStartTime" type="time"></div>
+      <div style="flex:1"><label>End time</label><input id="evEndTime" type="time"></div></div>
     <div class="field-inline">
       <button class="primary" onclick="submitNewEvent()">Create event</button>
       <button class="ghost" onclick="$('#newEventForm').innerHTML=''">Cancel</button>
@@ -263,7 +263,8 @@ async function submitNewEvent() {
   if (!name) return msg('Enter an event name.');
   if (!start || !end) return msg('Select start and end dates.');
   if (end < start) return msg('End date must be after start date.');
-  if (startTime && endTime && start === end && endTime <= startTime) return msg('End time must be after start time.');
+  if (!startTime || !endTime) return msg('Select a start and end time.');
+  if (start === end && endTime <= startTime) return msg('End time must be after start time.');
   try {
     const created = await callApi('createEvent', { clubId: state.currentClubId, name, description: desc, startDate: start, endDate: end, startTime, endTime }, me.token);
     state.events.push(created);
@@ -349,7 +350,9 @@ function renderRosterTab(el) {
         </select>
         <input id="stRoll" placeholder="Roll no (optional)" style="flex:1;margin:0">
         <button class="primary" onclick="addStudent()">Add</button>
+        <button class="ghost" onclick="showImportStudents()">Import list</button>
       </div><p class="error"></p>
+      <div id="importStudentsBox"></div>
     </div>
     <div class="card">
       <div class="row"><h2>Roster (<span id="rosterCount">${state.students.length}</span>)</h2>
@@ -357,6 +360,35 @@ function renderRosterTab(el) {
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Year</th><th>Roll no</th><th>Present days</th><th>Actions</th></tr></thead>
         <tbody id="rosterRows">${rows || `<tr><td colspan="5" class="empty">No students added yet.</td></tr>`}</tbody></table></div>
     </div>`;
+}
+function showImportStudents() {
+  $('#importStudentsBox').innerHTML = `<div class="card stack" style="margin-top:10px">
+    <h2>Import students</h2>
+    <p class="muted small">Paste one student per line. Each line can be just a name, or "Name, Year, Roll no" (year and roll no optional). Duplicate names already on the roster are skipped automatically.</p>
+    <textarea id="importText" rows="8" style="width:100%;font:inherit" placeholder="Utkarsh Agarwal, 2, 2028236&#10;Priya Sharma, 1&#10;Rahul Verma"></textarea>
+    <div class="field-inline">
+      <button class="primary" onclick="submitImportStudents()">Import</button>
+      <button class="ghost" onclick="$('#importStudentsBox').innerHTML=''">Cancel</button>
+    </div><p class="error" id="importError"></p></div>`;
+}
+function parseImportLine_(line) {
+  const parts = line.split(',').map(p => p.trim());
+  return { name: parts[0] || '', year: parts[1] || '', rollNo: parts[2] || '' };
+}
+async function submitImportStudents() {
+  const raw = $('#importText').value;
+  const rows = raw.split('\n').map(l => l.trim()).filter(Boolean).map(parseImportLine_).filter(r => r.name.length >= 2);
+  const errEl = $('#importError');
+  if (!rows.length) { errEl.textContent = 'Paste at least one valid name.'; return; }
+  try {
+    const result = await callApi('importStudents', { clubId: state.currentClubId, eventId: state.currentEventId, students: rows }, me.token);
+    result.created.forEach(s => state.students.push(s));
+    state.students.sort((a, b) => a.name.localeCompare(b.name));
+    $('#importStudentsBox').innerHTML = '';
+    onStudentsUpdate();
+    const skippedNote = result.skipped.length ? ` (${result.skipped.length} skipped as duplicates/invalid: ${result.skipped.slice(0, 5).join(', ')}${result.skipped.length > 5 ? '…' : ''})` : '';
+    msg(`Imported ${result.created.length} student(s).${skippedNote}`, true);
+  } catch (e) { errEl.textContent = e.message; }
 }
 function studentRowHtml(s) {
   return `<tr><td data-label="Name">${esc(s.name)}</td><td data-label="Year">${esc(s.year)}</td>

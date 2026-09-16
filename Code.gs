@@ -47,6 +47,7 @@ function doPost(e) {
       case 'setCheckin': data = actionSetCheckin(me, payload); break;
       case 'listStudents': data = actionListStudents(me, payload); break;
       case 'addStudent': data = actionAddStudent(me, payload); break;
+      case 'importStudents': data = actionImportStudents(me, payload); break;
       case 'editStudent': data = actionEditStudent(me, payload); break;
       case 'deleteStudent': data = actionDeleteStudent(me, payload); break;
       case 'toggleAttendance': data = actionToggleAttendance(me, payload); break;
@@ -104,6 +105,20 @@ function ensureSheets_() {
   cache.put('sheetsReady', SCHEMA_VERSION, 21600);
 }
 function sheet_(name) { return ss_().getSheetByName(name); }
+// BUGFIX: Google Sheets silently auto-converts text that looks like a date ("2026-10-21")
+// or time ("14:30") into a real Date-typed cell. Apps Script then hands that back as a
+// full JS Date object, which serializes to JSON as a complete UTC timestamp
+// ("2026-10-21T18:30:00.000Z") instead of the clean string the rest of the app expects —
+// that's the garbled value that was showing up under event names. Normalize every cell
+// back to the plain string format its column name implies, every time a row is read, so
+// it doesn't matter whether Sheets converted the cell or not.
+function normalizeCell_(header, value) {
+  if (!(value instanceof Date)) return value;
+  const tz = Session.getScriptTimeZone() || 'Etc/UTC';
+  if (/Date$/.test(header)) return Utilities.formatDate(value, tz, 'yyyy-MM-dd');
+  if (/Time$/.test(header)) return Utilities.formatDate(value, tz, 'HH:mm');
+  return value.toISOString();
+}
 function readAll_(name) {
   const sh = sheet_(name);
   const vals = sh.getDataRange().getValues();
@@ -112,7 +127,7 @@ function readAll_(name) {
   vals.forEach(function (r, idx) {
     if (r[0] === '' || r[0] == null) return;
     const obj = {};
-    headers.forEach(function (h, i) { obj[h] = r[i]; });
+    headers.forEach(function (h, i) { obj[h] = normalizeCell_(h, r[i]); });
     obj.__row = idx + 2;
     out.push(obj);
   });
@@ -261,17 +276,16 @@ function actionCreateEvent(me, payload) {
   requireClubAccess_(me, payload.clubId);
   const name = String(payload.name || '').trim(), desc = String(payload.description || '').trim();
   const start = payload.startDate, end = payload.endDate;
-  // Both optional (an all-day event has neither); if given, must be "HH:MM" from a
-  // native <input type="time">.
   const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
   const startTime = String(payload.startTime || '').trim();
   const endTime = String(payload.endTime || '').trim();
   if (!name) throw new Error('Enter an event name.');
   if (!start || !end) throw new Error('Select start and end dates.');
   if (end < start) throw new Error('End date must be after start date.');
-  if (startTime && !timeRe.test(startTime)) throw new Error('Start time is invalid.');
-  if (endTime && !timeRe.test(endTime)) throw new Error('End time is invalid.');
-  if (startTime && endTime && start === end && endTime <= startTime) throw new Error('End time must be after start time.');
+  if (!startTime || !endTime) throw new Error('Select a start and end time.');
+  if (!timeRe.test(startTime)) throw new Error('Start time is invalid.');
+  if (!timeRe.test(endTime)) throw new Error('End time is invalid.');
+  if (start === end && endTime <= startTime) throw new Error('End time must be after start time.');
   return withLock_(function () {
     const ev = { id: Utilities.getUuid(), clubId: payload.clubId, name: name, description: desc, startDate: start, endDate: end, checkinOpen: false, checkinDate: '', createdBy: me.uid, createdAt: new Date().toISOString(), startTime: startTime, endTime: endTime };
     appendRow_('Events', ev);
@@ -314,6 +328,36 @@ function actionAddStudent(me, payload) {
     const st = { id: Utilities.getUuid(), clubId: payload.clubId, eventId: payload.eventId, name: name, year: normalizeYear_(payload.year, 1), rollNo: String(payload.rollNo || '').trim(), attendance: '{}', addedAt: new Date().toISOString() };
     appendRow_('Students', st);
     return studentOut_(st);
+  });
+}
+// Bulk version of actionAddStudent, for pasting in a whole class list at once. Writes every
+// row with a single setValues() call inside one lock instead of one appendRow per student,
+// so importing 50 names costs one sheet write instead of 50.
+function actionImportStudents(me, payload) {
+  requireClubAccess_(me, payload.clubId);
+  const rows = Array.isArray(payload.students) ? payload.students : [];
+  if (!rows.length) throw new Error('No students to import.');
+  return withLock_(function () {
+    const existing = readAll_('Students').filter(function (s) { return s.eventId === payload.eventId; });
+    const seen = {};
+    existing.forEach(function (s) { seen[String(s.name).toLowerCase()] = true; });
+    const created = [];
+    const skipped = [];
+    rows.forEach(function (r) {
+      const name = String((r && r.name) || '').trim().replace(/\s+/g, ' ');
+      if (name.length < 2) { skipped.push(String((r && r.name) || '').trim() || '(blank)'); return; }
+      const key = name.toLowerCase();
+      if (seen[key]) { skipped.push(name); return; }
+      seen[key] = true;
+      created.push({ id: Utilities.getUuid(), clubId: payload.clubId, eventId: payload.eventId, name: name, year: normalizeYear_(r && r.year, 1), rollNo: String((r && r.rollNo) || '').trim(), attendance: '{}', addedAt: new Date().toISOString() });
+    });
+    if (created.length) {
+      const headers = SHEETS.Students;
+      const sh = sheet_('Students');
+      sh.getRange(sh.getLastRow() + 1, 1, created.length, headers.length)
+        .setValues(created.map(function (st) { return headers.map(function (h) { return st[h] !== undefined ? st[h] : ''; }); }));
+    }
+    return { created: created.map(studentOut_), skipped: skipped };
   });
 }
 function actionEditStudent(me, payload) {
