@@ -4,6 +4,18 @@ const app = document.getElementById('app');
 
 let students = [], selectedId = null, clubId, eventId, evInfo;
 
+// A persistent per-browser device id, created once and reused for every event this device
+// ever scans — sent to the server so it can enforce "one device, one submission per
+// session" itself, rather than trusting a client-side flag alone.
+function deviceId_() {
+  let id = localStorage.getItem('rmDeviceId');
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : 'dev-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    localStorage.setItem('rmDeviceId', id);
+  }
+  return id;
+}
+
 function theme() { document.body.classList.toggle('dark', localStorage.theme === 'dark'); }
 
 function shell(html) {
@@ -87,13 +99,27 @@ async function submitCheckin() {
   const btn = $('#submitBtn'); btn.disabled = true; btn.textContent = 'Submitting…';
   const lockKey = `checkin-${clubId}-${eventId}-${evInfo.checkinDate}`;
   try {
-    try { await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId }); }
-    catch (e1) { await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId }); }
+    try { await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId, deviceId: deviceId_() }); }
+    catch (e1) {
+      // Don't retry a legitimate server rejection (already marked from this device) —
+      // only retry genuine transient failures, same as elsewhere in the app.
+      if (String(e1.message || '').indexOf('already marked attendance') !== -1) throw e1;
+      await callApi('checkinSubmit', { clubId, eventId, studentId: selectedId, deviceId: deviceId_() });
+    }
     localStorage.setItem(lockKey, '1');
     shell(`<div class="card login center" style="margin:0"><h1 class="ok-text">Attendance recorded ✓</h1>
       <p class="muted">Thanks — your attendance has been sent successfully.</p></div>`);
   } catch (e) {
     console.error(e);
+    // The server itself now enforces one-submission-per-device (not just this browser's
+    // local flag), so this specific error means another student was already marked from
+    // this device for this session — treat it the same as the local "already submitted"
+    // screen instead of a generic retry-able error.
+    if (String(e.message || '').indexOf('already marked attendance') !== -1) {
+      localStorage.setItem(lockKey, '1');
+      return shell(`<div class="card login center" style="margin:0">
+        <h1 class="ok-text">Already submitted ✓</h1><p class="muted">This device already marked attendance for this session.</p></div>`);
+    }
     btn.disabled = false; btn.textContent = 'Submit attendance';
     const err = $('.error'); if (err) err.textContent = 'Could not submit. Please try again.';
   }

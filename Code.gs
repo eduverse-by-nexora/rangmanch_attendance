@@ -17,6 +17,11 @@ const SHEETS = {
   Clubs: ['id', 'name', 'createdBy', 'createdAt'],
   Events: ['id', 'clubId', 'name', 'description', 'startDate', 'endDate', 'checkinOpen', 'checkinDate', 'createdBy', 'createdAt', 'startTime', 'endTime'],
   Students: ['id', 'clubId', 'eventId', 'name', 'year', 'rollNo', 'attendance', 'addedAt'],
+  // Tracks which physical device has already submitted a check-in for a given
+  // event+checkinDate, so the *server* can refuse a second submission from the same
+  // device — the old protection was only a client-side localStorage flag, which anyone
+  // could bypass by clearing site data or opening a private tab.
+  CheckinLog: ['id', 'eventId', 'checkinDate', 'deviceId', 'studentId', 'submittedAt'],
   Meta: ['key', 'value']
 };
 
@@ -78,7 +83,7 @@ let _ss = null;
 function ss_() { return _ss || (_ss = SpreadsheetApp.getActiveSpreadsheet()); }
 // Bump this whenever SHEETS' columns change, so the cached "sheets are ready" flag below
 // (from a previous deploy, before the schema changed) doesn't wrongly skip migration.
-const SCHEMA_VERSION = '2';
+const SCHEMA_VERSION = '3';
 function ensureSheets_() {
   const cache = CacheService.getScriptCache();
   if (cache.get('sheetsReady') === SCHEMA_VERSION) return;
@@ -442,15 +447,26 @@ function actionCheckinInfo(payload) {
   return { open: true, event: { name: ev.name, checkinDate: ev.checkinDate }, students: students };
 }
 function actionCheckinSubmit(payload) {
+  const deviceId = String(payload.deviceId || '').trim();
+  if (!deviceId) throw new Error('Could not identify this device. Please reload the page and try again.');
   return withLock_(function () {
     const ev = findById_('Events', payload.eventId);
     if (!ev || ev.clubId !== payload.clubId || !ev.checkinOpen) throw new Error('Check-in is closed.');
     const s = findById_('Students', payload.studentId);
     if (!s || s.eventId !== payload.eventId) throw new Error('Student not found on roster.');
+    // Server-side enforcement: one device may submit once per event+checkinDate, no matter
+    // which student it tries to submit as. This is the real check — the client also keeps a
+    // local flag for instant UX, but that alone can be cleared/bypassed, so it must not be
+    // the only thing standing between one device and marking several different students.
+    const already = readAll_('CheckinLog').some(function (r) {
+      return r.eventId === payload.eventId && r.checkinDate === ev.checkinDate && r.deviceId === deviceId;
+    });
+    if (already) throw new Error('This device has already marked attendance for this session.');
     const att = safeParseJSON_(s.attendance);
     att[ev.checkinDate] = true;
     s.attendance = JSON.stringify(att);
     updateRow_('Students', s.__row, s);
+    appendRow_('CheckinLog', { id: Utilities.getUuid(), eventId: payload.eventId, checkinDate: ev.checkinDate, deviceId: deviceId, studentId: payload.studentId, submittedAt: new Date().toISOString() });
     return { date: ev.checkinDate };
   });
 }
