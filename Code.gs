@@ -15,7 +15,7 @@
 const SHEETS = {
   Admins: ['id', 'email', 'passHash', 'salt', 'role', 'clubs', 'createdAt'],
   Clubs: ['id', 'name', 'createdBy', 'createdAt'],
-  Events: ['id', 'clubId', 'name', 'description', 'startDate', 'endDate', 'checkinOpen', 'checkinDate', 'createdBy', 'createdAt'],
+  Events: ['id', 'clubId', 'name', 'description', 'startDate', 'endDate', 'checkinOpen', 'checkinDate', 'createdBy', 'createdAt', 'startTime', 'endTime'],
   Students: ['id', 'clubId', 'eventId', 'name', 'year', 'rollNo', 'attendance', 'addedAt'],
   Meta: ['key', 'value']
 };
@@ -75,9 +75,12 @@ function jsonOut_(obj) {
 // normal requests skip straight to reading/writing data instead of redoing setup work.
 let _ss = null;
 function ss_() { return _ss || (_ss = SpreadsheetApp.getActiveSpreadsheet()); }
+// Bump this whenever SHEETS' columns change, so the cached "sheets are ready" flag below
+// (from a previous deploy, before the schema changed) doesn't wrongly skip migration.
+const SCHEMA_VERSION = '2';
 function ensureSheets_() {
   const cache = CacheService.getScriptCache();
-  if (cache.get('sheetsReady') === '1') return;
+  if (cache.get('sheetsReady') === SCHEMA_VERSION) return;
   const ss = ss_();
   Object.keys(SHEETS).forEach(function (name) {
     let sh = ss.getSheetByName(name);
@@ -85,11 +88,20 @@ function ensureSheets_() {
       sh = ss.insertSheet(name);
       sh.getRange(1, 1, 1, SHEETS[name].length).setValues([SHEETS[name]]);
       sh.setFrozenRows(1);
+    } else {
+      // MIGRATION: a sheet that already existed before startTime/endTime were added to the
+      // schema won't have those header columns yet. Append any headers from SHEETS[name]
+      // that are missing, at the end, so existing columns/data keep their exact position
+      // and nothing already in the sheet shifts or gets overwritten.
+      const lastCol = sh.getLastColumn();
+      const existingHeaders = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+      const missing = SHEETS[name].filter(function (h) { return existingHeaders.indexOf(h) === -1; });
+      if (missing.length) sh.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]);
     }
   });
   const def = ss.getSheetByName('Sheet1');
   if (def && ss.getSheets().length > 1 && def.getLastRow() === 0) ss.deleteSheet(def);
-  cache.put('sheetsReady', '1', 21600);
+  cache.put('sheetsReady', SCHEMA_VERSION, 21600);
 }
 function sheet_(name) { return ss_().getSheetByName(name); }
 function readAll_(name) {
@@ -249,11 +261,19 @@ function actionCreateEvent(me, payload) {
   requireClubAccess_(me, payload.clubId);
   const name = String(payload.name || '').trim(), desc = String(payload.description || '').trim();
   const start = payload.startDate, end = payload.endDate;
+  // Both optional (an all-day event has neither); if given, must be "HH:MM" from a
+  // native <input type="time">.
+  const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const startTime = String(payload.startTime || '').trim();
+  const endTime = String(payload.endTime || '').trim();
   if (!name) throw new Error('Enter an event name.');
   if (!start || !end) throw new Error('Select start and end dates.');
   if (end < start) throw new Error('End date must be after start date.');
+  if (startTime && !timeRe.test(startTime)) throw new Error('Start time is invalid.');
+  if (endTime && !timeRe.test(endTime)) throw new Error('End time is invalid.');
+  if (startTime && endTime && start === end && endTime <= startTime) throw new Error('End time must be after start time.');
   return withLock_(function () {
-    const ev = { id: Utilities.getUuid(), clubId: payload.clubId, name: name, description: desc, startDate: start, endDate: end, checkinOpen: false, checkinDate: '', createdBy: me.uid, createdAt: new Date().toISOString() };
+    const ev = { id: Utilities.getUuid(), clubId: payload.clubId, name: name, description: desc, startDate: start, endDate: end, checkinOpen: false, checkinDate: '', createdBy: me.uid, createdAt: new Date().toISOString(), startTime: startTime, endTime: endTime };
     appendRow_('Events', ev);
     return stripRow_(ev);
   });
